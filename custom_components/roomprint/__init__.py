@@ -47,6 +47,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "unsub": None,
     }
 
+    # Simulation state (owned by websocket.py). Sim fingerprints live in
+    # memory ONLY — they are never written to the storage Store, so they
+    # can never pollute real survey data.
+    runtime["sim_fingerprints"] = {}
+    runtime["sim_geometries"] = {}
+    runtime["sim_rng"] = None
+    runtime["simulation"] = False
+
     async_setup_websocket(hass)
     await _async_register_panel(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

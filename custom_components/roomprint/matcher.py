@@ -7,8 +7,9 @@ Design (agreed with Alex, Nov 8 2026):
   90th percentile, detection rate. Fixed size whatever the walk duration.
 - Matching: interval penalty per sensor (0 inside [p10, p90], growing
   outside it), a missing-reading penalty scaled by detection rate, and
-  drop-the-worst-sensor forgiveness (one sensor much weaker than expected
-  — e.g. a closed door — must not veto the room).
+  drop-the-worst-sensor forgiveness — but only for a sensor reading much
+  WEAKER than expected. A door can only attenuate a signal, never
+  strengthen it, so a strong reading is evidence and is never forgiven.
 - Switching is two-tier: a decisive win switches immediately (the <2s
   goal); an ambiguous win waits out a dwell timer.
 - Quiet mode: an identical live vector short-circuits — nothing to decide.
@@ -80,20 +81,27 @@ def compute_fingerprint(samples: list[dict]) -> dict[str, dict]:
     return fingerprint
 
 
-def _sensor_penalty(reading: float | None, stats: dict) -> float:
-    """Penalty for one sensor: 0 = fits the fingerprint, higher = worse."""
+def _sensor_penalty(reading: float | None, stats: dict) -> tuple[float, bool]:
+    """(penalty, is_weak) for one sensor: 0 = fits the fingerprint.
+
+    is_weak means the sensor hears the phone much more weakly than this
+    room's fingerprint expects — the closed-door signature. A door can
+    only attenuate a signal, never strengthen it, so only a weak reading
+    is ever forgiven (see score_room); a strong reading is evidence.
+    """
     if stats["median"] is None:
-        return 0.0  # sensor never heard here; it says nothing either way
+        return 0.0, False  # sensor never heard here; it says nothing
     if reading is None:
         # Missing is censored data, not a zero: it matters exactly as much
-        # as this sensor usually hears the phone in this room.
-        return 2.0 * stats["detection_rate"]
+        # as this sensor usually hears the phone in this room. Missing is
+        # also a weak reading — a closed door can silence a sensor.
+        return 2.0 * stats["detection_rate"], True
     p10, p90, median = stats["p10"], stats["p90"], stats["median"]
     interval = max(p90 - p10, 1.0)
     if p10 <= reading <= p90:
-        return 0.5 * abs(reading - median) / interval
+        return 0.5 * abs(reading - median) / interval, False
     outside = min(abs(reading - p10), abs(reading - p90))
-    return 1.0 + outside / interval
+    return 1.0 + outside / interval, reading < p10
 
 
 def score_room(live: dict[str, float | None], fingerprint: dict, top_n: int = TOP_N) -> float:
@@ -109,7 +117,7 @@ def score_room(live: dict[str, float | None], fingerprint: dict, top_n: int = TO
         key=lambda item: item[1],
         reverse=True,
     )[:top_n]
-    penalties: list[float] = []
+    penalties: list[tuple[float, bool]] = []
     for scanner, rssi in present:
         stats = fingerprint.get(scanner)
         if stats is None:
@@ -124,8 +132,17 @@ def score_room(live: dict[str, float | None], fingerprint: dict, top_n: int = TO
     if not penalties:
         return float("inf")
     if len(penalties) >= 2:
-        penalties.remove(max(penalties))  # forgive the single worst sensor
-    return sum(penalties) / len(penalties)
+        # Forgive the single worst WEAK sensor — a door can only
+        # attenuate, so a weak reading is the closed-door signature.
+        # A sensor reading much STRONGER than this room expects is
+        # positive evidence against the room and is never forgiven:
+        # dropping it would blur neighbouring rooms together. Note the
+        # drop picks the worst weak penalty, not the worst overall, so
+        # one strong outlier cannot block forgiveness of the weak one.
+        weak = [item for item in penalties if item[1]]
+        if weak:
+            penalties.remove(max(weak, key=lambda item: item[0]))
+    return sum(penalty for penalty, _ in penalties) / len(penalties)
 
 
 class RoomMatcher:

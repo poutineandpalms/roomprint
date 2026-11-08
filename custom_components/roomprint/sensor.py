@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, EVENT_LIVE, LIVE_EVENT_MIN_INTERVAL
+from .const import DOMAIN, EVENT_LIVE, EVENT_ROOM_CHANGED, LIVE_EVENT_MIN_INTERVAL
 from .util import RSSI_UNKNOWN, scanner_key
 
 # A scanner not heard from within this long drops out of the live vector,
@@ -55,6 +55,7 @@ class RoomprintRoomSensor(SensorEntity):
         # scanner_key -> (rssi, timestamp of last hearing)
         self._latest: dict[str, tuple[float, float]] = {}
         self._last_event_at = 0.0
+        self._last_room_id: str | None = None
         self._unsub: Any = None
 
     async def async_added_to_hass(self) -> None:
@@ -68,6 +69,54 @@ class RoomprintRoomSensor(SensorEntity):
             bluetooth.BluetoothScanningMode.ACTIVE,
         )
         self.async_on_remove(self._unsub)
+        # The simulator drives the room through this same method; the
+        # websocket API reaches it via the runtime dict.
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        runtime["apply_live"] = self.apply_live
+        self.async_on_remove(lambda: runtime.pop("apply_live", None))
+
+    @callback
+    def apply_live(
+        self, live: dict[str, float | None], now: float
+    ) -> dict[str, Any] | None:
+        """Evaluate one live vector, update state, fire events.
+
+        Single entry point for both the Bluetooth callback and the
+        simulator: evaluate, update the sensor, fire a throttled
+        roomprint_live event, and fire roomprint_room_changed whenever
+        the estimated room actually changes. Returns the matcher result,
+        or None when there is nothing to match against yet.
+        """
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        matcher = runtime.get("matcher")
+        if matcher is None or not matcher.fingerprints:
+            return None
+        result = matcher.evaluate(live, now)
+        room_id = result["room"]
+        if room_id is not None and room_id != self._last_room_id:
+            self.hass.bus.async_fire(
+                EVENT_ROOM_CHANGED,
+                {
+                    "from_room": self._last_room_id,
+                    "to_room": room_id,
+                    "confidence": result["confidence"],
+                },
+            )
+            self._last_room_id = room_id
+        self._update_state(result)
+        if now - self._last_event_at >= LIVE_EVENT_MIN_INTERVAL:
+            self._last_event_at = now
+            self.hass.bus.async_fire(
+                EVENT_LIVE,
+                {
+                    "readings": {
+                        key: value for key, value in live.items() if value is not None
+                    },
+                    "room": room_id,
+                    "confidence": result["confidence"],
+                },
+            )
+        return result
 
     @callback
     def _async_handle_advert(
@@ -79,30 +128,17 @@ class RoomprintRoomSensor(SensorEntity):
         rssi = service_info.advertisement.rssi
         if rssi is None or rssi == RSSI_UNKNOWN:
             return
+        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        if runtime.get("simulation"):
+            return  # never mix real advertisements with a simulation
         now = time.time()
         self._latest[scanner_key(self.hass, service_info.source)] = (rssi, now)
-
-        runtime = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        matcher = runtime.get("matcher")
-        if matcher is None or not matcher.fingerprints:
-            return
         live = {
             key: rssi_value
             for key, (rssi_value, heard_at) in self._latest.items()
             if now - heard_at <= LIVE_VECTOR_MAX_AGE
         }
-        result = matcher.evaluate(live, now)
-        self._update_state(result)
-        if now - self._last_event_at >= LIVE_EVENT_MIN_INTERVAL:
-            self._last_event_at = now
-            self.hass.bus.async_fire(
-                EVENT_LIVE,
-                {
-                    "readings": live,
-                    "room": result["room"],
-                    "confidence": result["confidence"],
-                },
-            )
+        self.apply_live(live, now)
 
     def _update_state(self, result: dict[str, Any]) -> None:
         """Apply a matcher result to the entity state and attributes."""

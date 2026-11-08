@@ -50,6 +50,32 @@ for now.
    stable address — Roomprint tracks that address.
 3. Open **Room Survey** in the sidebar and survey each room, doors open.
 
+## Simulator
+
+No hardware yet? The **Simulate** tab in the panel (next to Survey)
+validates the whole flow with dummy data. It maps your Home Assistant
+areas onto a dummy floor plan by name (living, kitchen, master, guest,
+bath), builds dummy fingerprints from a path-loss model, and lets you
+drag a phone dot around an SVG map. The fake RSSI runs through the real
+matcher and the real room sensor, so you can watch `sensor.roomprint_room`
+change and room-change events fire as you drag across a boundary.
+
+1. Open **Room Survey** → **Simulate**.
+2. **Generate dummy fingerprints** (areas are matched by name; unmatched
+   areas are skipped).
+3. Turn simulation on and drag the phone dot around the map.
+
+Simulation is in memory only: dummy fingerprints are never written to
+storage, and real Bluetooth advertisements are ignored while it is on.
+Turning it off restores the real fingerprints. A real survey cannot
+start while simulation is on.
+
+**What it validates:** the matcher, the room sensor, the room-change
+events, the panel, and the survey/recording flow shape. **What it cannot
+test:** the radio layer — the proxies, Home Assistant Bluetooth, the
+advertisement callbacks, and your phone's actual advertisement rate.
+Those need real hardware.
+
 ## Local only
 
 Roomprint makes no network calls outside Home Assistant. No cloud
@@ -73,4 +99,6 @@ bug in Roomprint, not a requirement.
 - `sensor.py` — the room sensor, fed by the Bluetooth advertisement stream.
 - `websocket.py` — the `roomprint/*` API used by the survey panel.
 - `matcher.py` — the pure matcher core (stdlib only, no Home Assistant).
+- `simulate.py` — the dummy-map RSSI model (stdlib only). The panel sends
+  positions; this module computes the readings.
 - `frontend/roomprint-panel.js` — the survey panel.

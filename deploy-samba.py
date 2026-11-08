@@ -42,6 +42,7 @@ FILES = [
     "manifest.json",
     "matcher.py",
     "sensor.py",
+    "simulate.py",
     "util.py",
     "websocket.py",
     "frontend/roomprint-panel.js",

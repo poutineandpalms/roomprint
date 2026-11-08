@@ -6,15 +6,25 @@ Commands (all under the ``roomprint/`` namespace):
 - roomprint/stop_survey       -> {area_id, sample_count, fingerprint}
 - roomprint/get_survey_status -> {recording, area_id, started_at, sample_count}
 - roomprint/get_fingerprints  -> {area_id: fingerprint}
+- roomprint/generate_sim_fingerprints -> {mapping, fingerprints}
+- roomprint/set_simulation    {enabled} -> {simulation}
+- roomprint/sim_position      {x, y} -> {readings, room, confidence}
+- roomprint/get_simulation    -> {simulation, has_sim_fingerprints, geometries}
 
 The survey records the tracked device's advertisements with
 ``async_register_advertisement_callback`` (every packet, per scanner),
 snapshotting the latest per-scanner RSSI at most twice a second so a
 walk stays a few hundred samples, not tens of thousands.
+
+The simulator (generate_sim_fingerprints / sim_position) drives the
+same matcher and sensor through apply_live with dummy RSSI computed
+from a floor map — no hardware needed. Sim fingerprints live in memory
+only and are never written to storage.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Any
 
@@ -25,7 +35,8 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 
 from .const import DOMAIN
-from .matcher import compute_fingerprint
+from .matcher import RoomMatcher, compute_fingerprint
+from .simulate import DEFAULT_MAP, generate_fingerprints, readings_for_point
 from .util import RSSI_UNKNOWN, scanner_key
 
 # Snapshot the live readings into a survey sample at most this often.
@@ -58,6 +69,10 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_stop_survey)
     websocket_api.async_register_command(hass, websocket_get_survey_status)
     websocket_api.async_register_command(hass, websocket_get_fingerprints)
+    websocket_api.async_register_command(hass, websocket_generate_sim_fingerprints)
+    websocket_api.async_register_command(hass, websocket_set_simulation)
+    websocket_api.async_register_command(hass, websocket_sim_position)
+    websocket_api.async_register_command(hass, websocket_get_simulation)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "roomprint/list_areas"})
@@ -102,6 +117,13 @@ def websocket_start_survey(
         connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     survey = runtime["survey"]
+    if runtime.get("simulation"):
+        connection.send_error(
+            msg["id"],
+            "simulation_on",
+            "Turn simulation off before recording a real survey.",
+        )
+        return
     if survey["recording"]:
         connection.send_error(
             msg["id"], "already_recording", "A survey is already recording."
@@ -183,7 +205,10 @@ async def websocket_stop_survey(
         return
     fingerprints = runtime["fingerprints"]
     fingerprints[area_id] = fingerprint
-    runtime["matcher"].fingerprints = fingerprints
+    if not runtime.get("simulation"):
+        # While simulating, the live matcher runs dummy fingerprints;
+        # the real ones are restored when simulation is turned off.
+        runtime["matcher"].fingerprints = fingerprints
     await runtime["store"].async_save({"fingerprints": fingerprints})
     connection.send_result(
         msg["id"],
@@ -240,3 +265,199 @@ def websocket_get_fingerprints(
         connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     connection.send_result(msg["id"], dict(runtime.get("fingerprints", {})))
+
+
+# ---------------- simulator ----------------
+
+# Area-name keywords, in match order, onto the dummy-map room slugs.
+_SIM_SLUGS = ("living", "kitchen", "master", "guest", "bath")
+
+
+def _slug_for_area(name: str) -> str | None:
+    """Map a Home Assistant area name onto a dummy-map room slug."""
+    lowered = name.lower()
+    for slug in _SIM_SLUGS:
+        if slug in lowered:
+            return slug
+    return None
+
+
+def _apply_simulation(runtime: dict[str, Any], enabled: bool) -> None:
+    """Swap the matcher's fingerprints between real and simulated.
+
+    Replacing the matcher resets its current-room/dwell state, so the
+    sensor never carries a stale room across the switch.
+    """
+    runtime["simulation"] = enabled
+    if enabled:
+        runtime["matcher"] = RoomMatcher(runtime.get("sim_fingerprints", {}))
+    else:
+        runtime["matcher"] = RoomMatcher(runtime.get("fingerprints", {}))
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "roomprint/generate_sim_fingerprints"}
+)
+@callback
+def websocket_generate_sim_fingerprints(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Build dummy fingerprints from the map and turn simulation on.
+
+    Home Assistant areas are matched onto the dummy-map rooms by name.
+    Sim fingerprints live in memory only — they are never saved.
+    """
+    if not _require_admin(connection, msg):
+        return
+    runtime = _get_runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
+        return
+    if runtime.get("survey", {}).get("recording"):
+        connection.send_error(
+            msg["id"], "recording", "Stop the survey before simulating."
+        )
+        return
+    geometries: dict[str, dict] = {}
+    mapping: dict[str, str] = {}
+    for area in ar.async_get(hass).async_list_areas():
+        slug = _slug_for_area(area.name)
+        if slug is None:
+            continue
+        geometries[area.id] = DEFAULT_MAP[slug]
+        mapping[area.id] = slug
+    if not geometries:
+        connection.send_error(
+            msg["id"],
+            "no_matching_areas",
+            "No area name matched a dummy-map room (living, kitchen, "
+            "master, guest, bath).",
+        )
+        return
+    fingerprints = generate_fingerprints(geometries)
+    runtime["sim_fingerprints"] = fingerprints
+    runtime["sim_geometries"] = geometries
+    runtime["sim_rng"] = random.Random()
+    _apply_simulation(runtime, True)
+    connection.send_result(
+        msg["id"], {"mapping": mapping, "fingerprints": fingerprints}
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roomprint/set_simulation",
+        vol.Required("enabled"): bool,
+    }
+)
+@callback
+def websocket_set_simulation(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Turn simulation on or off. On swaps in the dummy fingerprints;
+    off restores the real ones."""
+    if not _require_admin(connection, msg):
+        return
+    runtime = _get_runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
+        return
+    enabled = msg["enabled"]
+    if enabled and not runtime.get("sim_fingerprints"):
+        connection.send_error(
+            msg["id"],
+            "no_sim_fingerprints",
+            "Generate dummy fingerprints first.",
+        )
+        return
+    if enabled and runtime.get("survey", {}).get("recording"):
+        connection.send_error(
+            msg["id"], "recording", "Stop the survey before simulating."
+        )
+        return
+    _apply_simulation(runtime, enabled)
+    connection.send_result(msg["id"], {"simulation": runtime["simulation"]})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roomprint/sim_position",
+        vol.Required("x"): vol.Coerce(float),
+        vol.Required("y"): vol.Coerce(float),
+    }
+)
+@callback
+def websocket_sim_position(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Feed one simulated phone position (metres) through the matcher."""
+    if not _require_admin(connection, msg):
+        return
+    runtime = _get_runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
+        return
+    if not runtime.get("simulation"):
+        connection.send_error(
+            msg["id"], "simulation_off", "Simulation is not on."
+        )
+        return
+    apply_live = runtime.get("apply_live")
+    if apply_live is None:
+        connection.send_error(
+            msg["id"], "not_ready", "The room sensor is not ready yet."
+        )
+        return
+    x = min(max(msg["x"], 0.0), 10.0)
+    y = min(max(msg["y"], 0.0), 6.0)
+    readings = readings_for_point(
+        x, y, runtime.get("sim_geometries", {}), runtime["sim_rng"]
+    )
+    result = apply_live(readings, time.time())
+    if result is None:
+        connection.send_error(
+            msg["id"], "not_ready", "The room sensor is not ready yet."
+        )
+        return
+    connection.send_result(
+        msg["id"],
+        {
+            "readings": {
+                key: value for key, value in readings.items() if value is not None
+            },
+            "room": result["room"],
+            "confidence": result["confidence"],
+        },
+    )
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "roomprint/get_simulation"}
+)
+@callback
+def websocket_get_simulation(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Simulation state for the panel."""
+    if not _require_admin(connection, msg):
+        return
+    runtime = _get_runtime(hass)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
+        return
+    connection.send_result(
+        msg["id"],
+        {
+            "simulation": bool(runtime.get("simulation")),
+            "has_sim_fingerprints": bool(runtime.get("sim_fingerprints")),
+            "geometries": dict(runtime.get("sim_geometries", {})),
+        },
+    )
