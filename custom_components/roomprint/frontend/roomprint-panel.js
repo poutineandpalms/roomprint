@@ -40,6 +40,10 @@ class RoomprintPanel extends HTMLElement {
     this._lastSimSent = 0;
     this._simTimer = null;
     this._lastRoomState = undefined;
+    // Devices (one config entry per phone). The selector at the top of
+    // the panel picks which device the Survey and Simulate tabs follow.
+    this._entries = [];
+    this._selectedEntryId = null;
     // One delegated click handler on the shadow root, attached once.
     // The panel rebuilds its inner HTML on every live update while
     // simulating; per-render listeners on the buttons die with the node
@@ -47,6 +51,13 @@ class RoomprintPanel extends HTMLElement {
     // click (button lights up, nothing happens). The shadow root itself
     // survives every rebuild, so clicks delegated here always land.
     this.shadowRoot.addEventListener("click", (e) => this._onRootClick(e));
+    // The device selector is a <select>, which fires "change", not
+    // "click". Delegated on the shadow root for the same reason.
+    this.shadowRoot.addEventListener("change", (e) => {
+      if (e.target && e.target.id === "device-select") {
+        this._selectDevice(e.target.value);
+      }
+    });
   }
 
   _onRootClick(event) {
@@ -132,12 +143,83 @@ class RoomprintPanel extends HTMLElement {
 
   /* ---------------- backend ---------------- */
 
+  // The entry the panel is currently following (first entry when the
+  // list has not loaded yet).
+  _selectedEntry() {
+    if (!this._entries.length) return null;
+    return (
+      this._entries.find((e) => e.entry_id === this._selectedEntryId) ||
+      this._entries[0]
+    );
+  }
+
+  _selectedSensorEntityId() {
+    const entry = this._selectedEntry();
+    return entry ? entry.sensor_entity_id : null;
+  }
+
+  // Entry-scoped websocket calls. Only send entry_id when a device is
+  // selected: the backend schema rejects an explicit null.
+  _withEntry(msg) {
+    if (this._selectedEntryId) msg.entry_id = this._selectedEntryId;
+    return msg;
+  }
+
+  // True when a bus event belongs to the selected device. Events carry
+  // the sensor's entity_id (v1.1+); accept events without one so an
+  // older backend cannot starve the panel.
+  _eventForSelected(data) {
+    const sensorId = this._selectedSensorEntityId();
+    if (!sensorId) return true;
+    if (!data || !data.entity_id) return true;
+    return data.entity_id === sensorId;
+  }
+
+  async _selectDevice(entryId) {
+    if (!entryId || entryId === this._selectedEntryId) return;
+    this._selectedEntryId = entryId;
+    // Per-device state is reset; _load re-fetches the survey status
+    // and simulation for the new device and re-renders.
+    this._stopPolling();
+    this._stopSimPolling();
+    this._recording = false;
+    this._startedAt = null;
+    this._sampleCount = 0;
+    this._liveReadings = {};
+    this._liveRoom = null;
+    this._roomEvents = [];
+    this._justFinished = null;
+    this._simMapping = null;
+    // The displayed room changes with the device; sync the re-render
+    // gate so the next hass assignment does not rebuild the DOM for a
+    // room that already shows.
+    this._lastRoomState = this._roomSensorState();
+    await this._load();
+  }
+
   async _load() {
     try {
+      // Entries first: the selection must be valid before the
+      // entry-scoped status fetch below.
+      const entries = await this._hass.callWS({
+        type: "roomprint/list_entries",
+      });
+      this._entries = entries || [];
+      if (this._entries.length) {
+        if (
+          !this._entries.some((e) => e.entry_id === this._selectedEntryId)
+        ) {
+          this._selectedEntryId = this._entries[0].entry_id;
+        }
+      } else {
+        this._selectedEntryId = null;
+      }
       const [areas, fingerprints, status] = await Promise.all([
         this._hass.callWS({ type: "roomprint/list_areas" }),
         this._hass.callWS({ type: "roomprint/get_fingerprints" }),
-        this._hass.callWS({ type: "roomprint/get_survey_status" }),
+        this._hass.callWS(
+          this._withEntry({ type: "roomprint/get_survey_status" })
+        ),
       ]);
       this._areas = areas || [];
       this._fingerprints = fingerprints || {};
@@ -152,7 +234,9 @@ class RoomprintPanel extends HTMLElement {
 
   async _loadSim() {
     try {
-      const sim = await this._hass.callWS({ type: "roomprint/get_simulation" });
+      const sim = await this._hass.callWS(
+        this._withEntry({ type: "roomprint/get_simulation" })
+      );
       this._sim = {
         simulation: !!sim.simulation,
         has_sim_fingerprints: !!sim.has_sim_fingerprints,
@@ -179,10 +263,12 @@ class RoomprintPanel extends HTMLElement {
 
   async _startSurvey(areaId) {
     try {
-      const status = await this._hass.callWS({
-        type: "roomprint/start_survey",
-        area_id: areaId,
-      });
+      const status = await this._hass.callWS(
+        this._withEntry({
+          type: "roomprint/start_survey",
+          area_id: areaId,
+        })
+      );
       this._recording = true;
       this._startedAt = status.started_at;
       this._sampleCount = 0;
@@ -197,7 +283,9 @@ class RoomprintPanel extends HTMLElement {
 
   async _stopSurvey() {
     try {
-      const result = await this._hass.callWS({ type: "roomprint/stop_survey" });
+      const result = await this._hass.callWS(
+        this._withEntry({ type: "roomprint/stop_survey" })
+      );
       this._justFinished = result;
       this._recording = false;
       this._stopPolling();
@@ -210,9 +298,9 @@ class RoomprintPanel extends HTMLElement {
 
   async _pollStatus() {
     try {
-      const status = await this._hass.callWS({
-        type: "roomprint/get_survey_status",
-      });
+      const status = await this._hass.callWS(
+        this._withEntry({ type: "roomprint/get_survey_status" })
+      );
       this._applyStatus(status);
       this._render();
     } catch (err) {
@@ -234,6 +322,7 @@ class RoomprintPanel extends HTMLElement {
 
   _onLiveEvent(event) {
     const data = event && event.data ? event.data : {};
+    if (!this._eventForSelected(data)) return;
     if (data.readings) {
       this._liveReadings = data.readings;
       this._liveRoom = data.room || null;
@@ -247,6 +336,7 @@ class RoomprintPanel extends HTMLElement {
 
   _onRoomChanged(event) {
     const data = event && event.data ? event.data : {};
+    if (!this._eventForSelected(data)) return;
     const to = data.to_room ? this._areaName(data.to_room) : "Unknown";
     const from = data.from_room ? this._areaName(data.from_room) : null;
     const text = from ? `Entered ${to} (left ${from})` : `Entered ${to}`;
@@ -287,9 +377,9 @@ class RoomprintPanel extends HTMLElement {
 
   async _generateSim() {
     try {
-      const result = await this._hass.callWS({
-        type: "roomprint/generate_sim_fingerprints",
-      });
+      const result = await this._hass.callWS(
+        this._withEntry({ type: "roomprint/generate_sim_fingerprints" })
+      );
       this._simMapping = result.mapping || {};
       await this._loadSim();
       await this._sendSimPosition();
@@ -304,10 +394,12 @@ class RoomprintPanel extends HTMLElement {
   async _toggleSimulation() {
     const enabled = !this._sim.simulation;
     try {
-      const result = await this._hass.callWS({
-        type: "roomprint/set_simulation",
-        enabled,
-      });
+      const result = await this._hass.callWS(
+        this._withEntry({
+          type: "roomprint/set_simulation",
+          enabled,
+        })
+      );
       this._sim.simulation = !!result.simulation;
       if (enabled) await this._sendSimPosition();
     } catch (err) {
@@ -321,11 +413,13 @@ class RoomprintPanel extends HTMLElement {
     if (!this._sim.simulation) return;
     this._lastSimSent = Date.now();
     try {
-      const result = await this._hass.callWS({
-        type: "roomprint/sim_position",
-        x: this._simPos.x,
-        y: this._simPos.y,
-      });
+      const result = await this._hass.callWS(
+        this._withEntry({
+          type: "roomprint/sim_position",
+          x: this._simPos.x,
+          y: this._simPos.y,
+        })
+      );
       if (result.readings) this._liveReadings = result.readings;
       if (result.room) this._liveRoom = result.room;
       // The roomprint_live event already re-renders the Simulate tab;
@@ -367,19 +461,32 @@ class RoomprintPanel extends HTMLElement {
   }
 
   _roomSensorState() {
-    // The room sensor's state string, or undefined. hass.states is an
-    // array in some frontend builds and a keyed object in others — the
-    // panel hard-crashed on .find() when it was the object form, which
-    // blanked the whole panel, so handle both and never throw here.
+    // The selected device's room sensor state string, or undefined.
+    // Falls back to the single-entry sensor id before the entries
+    // list has loaded. hass.states is an array in some frontend builds
+    // and a keyed object in others — the panel hard-crashed on .find()
+    // when it was the object form, which blanked the whole panel, so
+    // handle both and never throw here.
+    const entityId =
+      this._selectedSensorEntityId() || "sensor.roomprint_room";
     const states = this._hass && this._hass.states;
     if (!states) return undefined;
     let state = null;
     if (Array.isArray(states)) {
-      state = states.find((s) => s.entity_id === "sensor.roomprint_room");
+      state = states.find((s) => s.entity_id === entityId);
     } else if (typeof states === "object") {
-      state = states["sensor.roomprint_room"];
+      state = states[entityId];
     }
     return state && state.state !== undefined ? state.state : undefined;
+  }
+
+  _esc(value) {
+    // Labels are user-typed; escape before interpolating into HTML.
+    return String(value ?? "").replace(
+      /[&<>"']/g,
+      (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]
+    );
   }
 
   _currentRoomName() {
@@ -469,10 +576,25 @@ class RoomprintPanel extends HTMLElement {
       .room-big { font-size: 32px; font-weight: 700; margin: 4px 0 8px; }
       .feed-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--divider-color, #e0e0e0); }
       .feed-item .time { color: var(--secondary-text-color, #727272); white-space: nowrap; }
+      .device-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+      .device-row label { font-weight: 600; white-space: nowrap; }
+      .device-row select { flex: 1; min-width: 0; padding: 10px; border-radius: 10px; border: 1px solid var(--divider-color, #e0e0e0); background: var(--card-background-color, #fff); color: var(--primary-text-color, #212121); font-size: 16px; }
     `;
     let body = "";
     if (this._error) {
       body += `<div class="error">${this._error}</div>`;
+    }
+    if (this._entries.length) {
+      const options = this._entries
+        .map(
+          (e) =>
+            `<option value="${this._esc(e.entry_id)}" ${
+              e.entry_id === this._selectedEntryId ? "selected" : ""
+            }>${this._esc(e.label)} (${this._esc(e.address)})</option>`
+        )
+        .join("");
+      body += `<div class="device-row"><label for="device-select">Device</label>
+        <select id="device-select">${options}</select></div>`;
     }
     body += `<div class="tabs">
       <button class="tab ${this._tab === "survey" ? "active" : ""}" data-tab="survey">Survey</button>

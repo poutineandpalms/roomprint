@@ -1,15 +1,23 @@
 """WebSocket API for the Room Survey panel — admin only, all local.
 
 Commands (all under the ``roomprint/`` namespace):
+- roomprint/list_entries      -> [{entry_id, label, address,
+                                   sensor_entity_id, tracker_entity_id}]
 - roomprint/list_areas        -> [{area_id, name, surveyed}]
-- roomprint/start_survey      {area_id} -> {area_id, started_at}
-- roomprint/stop_survey       -> {area_id, sample_count, fingerprint}
-- roomprint/get_survey_status -> {recording, area_id, started_at, sample_count}
+- roomprint/start_survey      {area_id, [entry_id]} -> {area_id, started_at}
+- roomprint/stop_survey       {[entry_id]} -> {area_id, sample_count, fingerprint}
+- roomprint/get_survey_status {[entry_id]} -> {recording, area_id, started_at, sample_count}
 - roomprint/get_fingerprints  -> {area_id: fingerprint}
-- roomprint/generate_sim_fingerprints -> {mapping, fingerprints}
-- roomprint/set_simulation    {enabled} -> {simulation}
-- roomprint/sim_position      {x, y} -> {readings, room, confidence}
-- roomprint/get_simulation    -> {simulation, has_sim_fingerprints, geometries}
+- roomprint/generate_sim_fingerprints {[entry_id]} -> {mapping, fingerprints}
+- roomprint/set_simulation    {enabled, [entry_id]} -> {simulation}
+- roomprint/sim_position      {x, y, [entry_id]} -> {readings, room, confidence}
+- roomprint/get_simulation    {[entry_id]} -> {simulation, has_sim_fingerprints, geometries}
+
+Commands that take an entry_id target that entry's device; when it is
+omitted they use the first entry, so the single-device panel keeps
+working unchanged. Fingerprints are shared across entries (one global
+Store), but each entry has its own runtime: its own survey, its own
+simulation, its own matcher.
 
 The survey records the tracked device's advertisements with
 ``async_register_advertisement_callback`` (every packet, per scanner),
@@ -33,22 +41,61 @@ from homeassistant.components import bluetooth, websocket_api
 from homeassistant.components.websocket_api import ActiveConnection
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .matcher import RoomMatcher, compute_fingerprint
 from .simulate import DEFAULT_MAP, generate_fingerprints, readings_for_point
-from .util import RSSI_UNKNOWN, scanner_key
+from .util import RSSI_UNKNOWN, resolved_address, resolved_label, scanner_key
 
 # Snapshot the live readings into a survey sample at most this often.
 SAMPLE_MIN_INTERVAL = 0.5  # seconds
 
 
-def _get_runtime(hass: HomeAssistant) -> dict[str, Any] | None:
-    """Runtime of the single Roomprint config entry, or None if unset."""
+def _get_runtime(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> dict[str, Any] | None:
+    """Runtime of one Roomprint config entry, or None if unset.
+
+    The named entry when entry_id is given, the first entry when it is
+    omitted. None when there are no entries, the id is unknown, or the
+    entry is not loaded.
+    """
     entries = hass.config_entries.async_entries(DOMAIN)
     if not entries:
         return None
-    return hass.data.get(DOMAIN, {}).get(entries[0].entry_id)
+    if entry_id is None:
+        entry = entries[0]
+    else:
+        entry = next((e for e in entries if e.entry_id == entry_id), None)
+        if entry is None:
+            return None
+    return hass.data.get(DOMAIN, {}).get(entry.entry_id)
+
+
+def _resolve_runtime(
+    hass: HomeAssistant, connection: ActiveConnection, msg: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Runtime for the entry a command targets, or send an error.
+
+    The entry_id in the message wins; omitted means the first entry.
+    Unknown ids get "unknown_entry", no entries (or an unloaded entry)
+    get "not_configured". Returns None after sending the error.
+    """
+    entry_id = msg.get("entry_id")
+    if entry_id is not None and not any(
+        e.entry_id == entry_id
+        for e in hass.config_entries.async_entries(DOMAIN)
+    ):
+        connection.send_error(
+            msg["id"], "unknown_entry", f"No such entry: {entry_id}"
+        )
+        return None
+    runtime = _get_runtime(hass, entry_id)
+    if runtime is None:
+        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
+        return None
+    return runtime
 
 
 def _require_admin(
@@ -64,6 +111,7 @@ def _require_admin(
 @callback
 def async_setup(hass: HomeAssistant) -> None:
     """Register the roomprint/* websocket commands."""
+    websocket_api.async_register_command(hass, websocket_list_entries)
     websocket_api.async_register_command(hass, websocket_list_areas)
     websocket_api.async_register_command(hass, websocket_start_survey)
     websocket_api.async_register_command(hass, websocket_stop_survey)
@@ -73,6 +121,39 @@ def async_setup(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_set_simulation)
     websocket_api.async_register_command(hass, websocket_sim_position)
     websocket_api.async_register_command(hass, websocket_get_simulation)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "roomprint/list_entries"})
+@callback
+def websocket_list_entries(
+    hass: HomeAssistant,
+    connection: ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """List every Roomprint entry with its device and entity ids.
+
+    The panel's device selector is built from this. Entity ids come
+    from the entity registry via the entry-based unique ids, so they
+    are null until the entry has loaded its platforms at least once.
+    """
+    if not _require_admin(connection, msg):
+        return
+    registry = er.async_get(hass)
+    entries = [
+        {
+            "entry_id": entry.entry_id,
+            "label": resolved_label(entry),
+            "address": resolved_address(entry),
+            "sensor_entity_id": registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{entry.entry_id}-room"
+            ),
+            "tracker_entity_id": registry.async_get_entity_id(
+                "device_tracker", DOMAIN, f"{entry.entry_id}-tracker"
+            ),
+        }
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    ]
+    connection.send_result(msg["id"], entries)
 
 
 @websocket_api.websocket_command({vol.Required("type"): "roomprint/list_areas"})
@@ -101,6 +182,7 @@ def websocket_list_areas(
     {
         vol.Required("type"): "roomprint/start_survey",
         vol.Required("area_id"): str,
+        vol.Optional("entry_id"): str,
     }
 )
 @callback
@@ -112,9 +194,8 @@ def websocket_start_survey(
     """Start recording a survey walk for one area."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     survey = runtime["survey"]
     if runtime.get("simulation"):
@@ -168,7 +249,12 @@ def websocket_start_survey(
     )
 
 
-@websocket_api.websocket_command({vol.Required("type"): "roomprint/stop_survey"})
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "roomprint/stop_survey",
+        vol.Optional("entry_id"): str,
+    }
+)
 @websocket_api.async_response
 async def websocket_stop_survey(
     hass: HomeAssistant,
@@ -178,9 +264,8 @@ async def websocket_stop_survey(
     """Stop the survey, compute and save the fingerprint."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     survey = runtime["survey"]
     if not survey["recording"]:
@@ -221,7 +306,10 @@ async def websocket_stop_survey(
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "roomprint/get_survey_status"}
+    {
+        vol.Required("type"): "roomprint/get_survey_status",
+        vol.Optional("entry_id"): str,
+    }
 )
 @callback
 def websocket_get_survey_status(
@@ -232,9 +320,8 @@ def websocket_get_survey_status(
     """Current survey state (for the panel timer and sample count)."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     survey = runtime["survey"]
     connection.send_result(
@@ -296,7 +383,10 @@ def _apply_simulation(runtime: dict[str, Any], enabled: bool) -> None:
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "roomprint/generate_sim_fingerprints"}
+    {
+        vol.Required("type"): "roomprint/generate_sim_fingerprints",
+        vol.Optional("entry_id"): str,
+    }
 )
 @callback
 def websocket_generate_sim_fingerprints(
@@ -311,9 +401,8 @@ def websocket_generate_sim_fingerprints(
     """
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     if runtime.get("survey", {}).get("recording"):
         connection.send_error(
@@ -350,6 +439,7 @@ def websocket_generate_sim_fingerprints(
     {
         vol.Required("type"): "roomprint/set_simulation",
         vol.Required("enabled"): bool,
+        vol.Optional("entry_id"): str,
     }
 )
 @callback
@@ -362,9 +452,8 @@ def websocket_set_simulation(
     off restores the real ones."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     enabled = msg["enabled"]
     if enabled and not runtime.get("sim_fingerprints"):
@@ -388,6 +477,7 @@ def websocket_set_simulation(
         vol.Required("type"): "roomprint/sim_position",
         vol.Required("x"): vol.Coerce(float),
         vol.Required("y"): vol.Coerce(float),
+        vol.Optional("entry_id"): str,
     }
 )
 @callback
@@ -399,9 +489,8 @@ def websocket_sim_position(
     """Feed one simulated phone position (metres) through the matcher."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     if not runtime.get("simulation"):
         connection.send_error(
@@ -438,7 +527,10 @@ def websocket_sim_position(
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "roomprint/get_simulation"}
+    {
+        vol.Required("type"): "roomprint/get_simulation",
+        vol.Optional("entry_id"): str,
+    }
 )
 @callback
 def websocket_get_simulation(
@@ -449,9 +541,8 @@ def websocket_get_simulation(
     """Simulation state for the panel."""
     if not _require_admin(connection, msg):
         return
-    runtime = _get_runtime(hass)
+    runtime = _resolve_runtime(hass, connection, msg)
     if runtime is None:
-        connection.send_error(msg["id"], "not_configured", "Roomprint is not set up.")
         return
     connection.send_result(
         msg["id"],

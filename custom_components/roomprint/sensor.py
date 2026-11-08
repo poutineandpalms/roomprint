@@ -19,7 +19,13 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, EVENT_LIVE, EVENT_ROOM_CHANGED, LIVE_EVENT_MIN_INTERVAL
-from .util import RSSI_UNKNOWN, resolved_address, scanner_key
+from .util import (
+    RSSI_UNKNOWN,
+    resolved_address,
+    resolved_label,
+    resolved_person,
+    scanner_key,
+)
 
 # A scanner not heard from within this long drops out of the live vector,
 # so a stale strong reading cannot pin the room after you walk away.
@@ -38,7 +44,6 @@ async def async_setup_entry(
 class RoomprintRoomSensor(SensorEntity):
     """Current room of the tracked device, as estimated by Roomprint."""
 
-    _attr_name = "Roomprint room"
     _attr_should_poll = False
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -46,6 +51,16 @@ class RoomprintRoomSensor(SensorEntity):
         self._entry = entry
         # Options (Configure) can change the address after setup.
         self._address = resolved_address(entry)
+        # The entity is named after the device's label, so each person's
+        # sensor reads like "Alex's iPhone room". The existing entry has
+        # no label and falls back to its title, "Roomprint", so its name
+        # stays "Roomprint room" and its entity id does not change.
+        self._label = resolved_label(entry)
+        self._attr_name = f"{self._label} room"
+        # The linked native Person entity (or None). This — never the
+        # typed label — is what the room events report as the person.
+        # The entry reloads on options change, so this stays fresh.
+        self._person = resolved_person(entry)
         # Unique id is the config entry id — stable across address
         # changes, so the entity survives a re-address. Never key it on
         # the address itself.
@@ -55,6 +70,7 @@ class RoomprintRoomSensor(SensorEntity):
             "confidence": None,
             "margin": None,
             "scores": None,
+            "person": self._person,
         }
         # scanner_key -> (rssi, timestamp of last hearing)
         self._latest: dict[str, tuple[float, float]] = {}
@@ -107,6 +123,8 @@ class RoomprintRoomSensor(SensorEntity):
                     "to_room": room_id,
                     "confidence": result["confidence"],
                     "device": self._address,
+                    "label": self._label,
+                    "person": self._person,
                     "entity_id": self.entity_id,
                 },
             )
@@ -123,6 +141,8 @@ class RoomprintRoomSensor(SensorEntity):
                     "room": room_id,
                     "confidence": result["confidence"],
                     "device": self._address,
+                    "label": self._label,
+                    "person": self._person,
                     "entity_id": self.entity_id,
                 },
             )

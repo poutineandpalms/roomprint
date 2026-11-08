@@ -20,11 +20,12 @@ triangulation — just fingerprints.
    slowly — perimeter, middle, linger at the doorway — and stop. The
    walk becomes one fixed-size fingerprint per room: per scanner, the
    median, 10th and 90th percentile, and detection rate.
-3. **Live matching.** A `sensor.roomprint_room` entity reports the current
-   room, with confidence and margin attributes. It is event-driven: a new
-   advertisement re-evaluates the room, a decisive win switches
-   immediately (the under-2-seconds goal), an ambiguous win waits out a
-   short dwell. When the phone is still, the matcher goes quiet.
+3. **Live matching.** Each device gets a room sensor (e.g.
+   `sensor.roomprint_room`) reporting the current room, with confidence
+   and margin attributes. It is event-driven: a new advertisement
+   re-evaluates the room, a decisive win switches immediately (the
+   under-2-seconds goal), an ambiguous win waits out a short dwell.
+   When the phone is still, the matcher goes quiet.
 4. **Automations.** Use the sensor like any other: lights, speakers,
    whatever you want, per room.
 
@@ -44,28 +45,52 @@ for now.
 1. Create one Home Assistant area per room (Settings → Areas & zones)
    and assign one Bluetooth proxy to each.
 2. Add the integration (Settings → Devices & services → Add integration
-   → Roomprint) and enter the Bluetooth address of the device to track
-   (your phone). If your phone's address rotates, add it to the Private
+   → Roomprint), name the device (e.g. "Alex's iPhone") and enter its
+   Bluetooth address. Optionally link the device to a person (a
+   dropdown of your Home Assistant people) — room events will report
+   that person. If your phone's address rotates, add it to the Private
    BLE Device integration first so Home Assistant resolves it to one
-   stable address — Roomprint tracks that address. To change the address
-   later, use Settings → Devices & services → Roomprint → Configure
-   (the entry reloads and the sensor subscribes to the new address).
+   stable address — Roomprint tracks that address. To change the name,
+   address, or linked person later, use Settings → Devices & services
+   → Roomprint → Configure (the entry reloads and the sensor subscribes
+   to the new address).
 3. Open **Room Survey** in the sidebar and survey each room, doors open.
 
 ## Multiple people
 
 One config entry tracks one phone, so a household adds one entry per
-person. Each entry gets its own room sensor (`sensor.roomprint_room`,
-with more entries the names gain suffixes) and its own
-`roomprint_room_changed` event carrying that device's address.
+person: Settings → Devices & services → Add integration → Roomprint,
+once per phone, each with its own name. The same Bluetooth address
+cannot be added twice. Each entry gets its own room sensor (named
+after the device, e.g. `sensor.alex_s_iphone_room`) and its own
+`roomprint_room_changed` event carrying that device's address, label,
+and linked person.
 
-Each entry also creates a `device_tracker.roomprint_tracker` entity:
-its state is `home` while the phone is heard, `not_home` once it goes
-quiet for 3 minutes, and `unknown` before it is ever seen. The room is
-an `area` attribute on the tracker, not its state. Link the tracker to
-a person in Settings → People and that person's state follows it
-natively (home / not_home) — the room itself stays on the room sensor,
-which is where room automations should trigger.
+Two separate links connect a device to a person — don't mix them up:
+
+- **Home / away: the device tracker.** Each entry also creates its own
+  `device_tracker` (e.g. `device_tracker.alex_s_iphone_tracker`): its
+  state is `home` while the phone is heard, `not_home` once it goes
+  quiet for 3 minutes, and `unknown` before it is ever seen. The room
+  is an `area` attribute on the tracker, not its state. Link each
+  tracker to its person in Settings → People and that person's state
+  follows it natively (home / not_home).
+- **Who is in which room: the person picked in setup.** When you add
+  (or Configure) an entry, pick the device's person from the dropdown
+  of your Home Assistant people. That person entity — `person.alex`,
+  say — is what the room sensor's `person` attribute and the
+  `roomprint_room_changed` / `roomprint_live` events report. A device
+  with no person picked reports `null`.
+
+The typed name is only the device's display name (entry title, sensor
+and tracker names). It never identifies the person — only the picked
+`person.*` entity does.
+
+The Room Survey panel has a device selector at the top: pick a device
+and the Survey and Simulate tabs follow it — its room list, its live
+signal bars, its room-change feed, and its simulation. Fingerprints
+are shared: one survey per area covers every device, since the
+fingerprint is a property of the room, not the phone.
 
 ## Simulator
 
@@ -112,12 +137,15 @@ bug in Roomprint, not a requirement.
 - `manifest.json` — integration metadata (`requirements: []`,
   `iot_class: calculated`, config flow).
 - `__init__.py` — setup, storage, sidebar panel registration.
-- `config_flow.py` — setup: the tracked device's Bluetooth address.
-  Options flow (Configure): change the address after setup.
+- `config_flow.py` — setup: one entry per device (name + Bluetooth
+  address + optional native Person link, duplicate addresses refused).
+  Options flow (Configure): change the name, address, or person after
+  setup.
 - `sensor.py` — the room sensor, fed by the Bluetooth advertisement stream.
 - `device_tracker.py` — home/not_home tracker per device, for the native
   Person (room as its `area` attribute, never its state).
-- `websocket.py` — the `roomprint/*` API used by the survey panel.
+- `websocket.py` — the `roomprint/*` API used by the survey panel
+  (`list_entries` + per-entry routing for survey and simulation).
 - `matcher.py` — the pure matcher core (stdlib only, no Home Assistant).
 - `simulate.py` — the dummy-map RSSI model (stdlib only). The panel sends
   positions; this module computes the readings.

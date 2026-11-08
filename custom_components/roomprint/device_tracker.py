@@ -29,6 +29,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import DOMAIN
+from .util import resolved_label
 
 # The phone counts as home while heard within this long; after that it
 # is not_home. (Bermuda uses a similar consider-home window.)
@@ -50,13 +51,17 @@ async def async_setup_entry(
 class RoomprintDeviceTracker(BaseScannerEntity):
     """Home/not_home for one tracked device, with its room as an attribute."""
 
-    _attr_name = "Roomprint Tracker"
     _attr_should_poll = False
     _attr_source_type = SourceType.BLUETOOTH_LE
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
+        # Named after the device's label, like the room sensor. The
+        # existing entry falls back to its title, "Roomprint", so its
+        # name stays "Roomprint Tracker" and its entity id does not
+        # change — a link to a Person survives.
+        self._attr_name = f"{resolved_label(entry)} tracker"
         # Unique id is the config entry id — stable across address
         # changes, so the tracker (and its link to a Person) survives
         # a re-address. Never key it on the address itself.

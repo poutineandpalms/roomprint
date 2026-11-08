@@ -6,6 +6,11 @@ DOMAIN = "roomprint"
 STORAGE_KEY = "roomprint"
 STORAGE_VERSION = 1
 
+# Data/options key for the linked person entity_id (e.g. "person.alex").
+# The person is Home Assistant's native Person entity — never the typed
+# label, which is only the device's display name.
+CONF_PERSON = "person"
+
 PLATFORMS: list[str] = ["sensor", "device_tracker"]
 
 # Event fired on the bus (throttled) so the survey panel can show live bars.
