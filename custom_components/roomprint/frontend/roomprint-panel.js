@@ -108,11 +108,7 @@ class RoomprintPanel extends HTMLElement {
     // second — and a rebuild landing mid-tap destroys the button under
     // the finger. Re-render only when the room itself changed; the live
     // bars update through the roomprint_live event instead.
-    const roomState =
-      hass && hass.states
-        ? (hass.states.find((s) => s.entity_id === "sensor.roomprint_room") || {})
-            .state
-        : undefined;
+    const roomState = this._roomSensorState();
     if (roomState !== this._lastRoomState && !this._dragging) {
       this._lastRoomState = roomState;
       this._render();
@@ -370,12 +366,25 @@ class RoomprintPanel extends HTMLElement {
     return "Scanner " + String(key).slice(-5);
   }
 
+  _roomSensorState() {
+    // The room sensor's state string, or undefined. hass.states is an
+    // array in some frontend builds and a keyed object in others — the
+    // panel hard-crashed on .find() when it was the object form, which
+    // blanked the whole panel, so handle both and never throw here.
+    const states = this._hass && this._hass.states;
+    if (!states) return undefined;
+    let state = null;
+    if (Array.isArray(states)) {
+      state = states.find((s) => s.entity_id === "sensor.roomprint_room");
+    } else if (typeof states === "object") {
+      state = states["sensor.roomprint_room"];
+    }
+    return state && state.state !== undefined ? state.state : undefined;
+  }
+
   _currentRoomName() {
-    const state =
-      this._hass && this._hass.states
-        ? this._hass.states.find((s) => s.entity_id === "sensor.roomprint_room")
-        : null;
-    if (state && state.state && state.state !== "unknown") return state.state;
+    const state = this._roomSensorState();
+    if (state && state !== "unknown") return state;
     if (this._liveRoom) return this._areaName(this._liveRoom);
     return "—";
   }
