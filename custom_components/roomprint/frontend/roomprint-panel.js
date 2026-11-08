@@ -39,6 +39,35 @@ class RoomprintPanel extends HTMLElement {
     this._dragging = false;
     this._lastSimSent = 0;
     this._simTimer = null;
+    this._lastRoomState = undefined;
+    // One delegated click handler on the shadow root, attached once.
+    // The panel rebuilds its inner HTML on every live update while
+    // simulating; per-render listeners on the buttons die with the node
+    // they sit on, and on a phone a rebuild landing mid-tap eats the
+    // click (button lights up, nothing happens). The shadow root itself
+    // survives every rebuild, so clicks delegated here always land.
+    this.shadowRoot.addEventListener("click", (e) => this._onRootClick(e));
+  }
+
+  _onRootClick(event) {
+    const tab = event.target.closest("[data-tab]");
+    if (tab) {
+      this._tab = tab.getAttribute("data-tab");
+      this._syncSimPolling();
+      this._render();
+      return;
+    }
+    const room = event.target.closest(".room");
+    if (room) {
+      this._selectedAreaId = room.getAttribute("data-area");
+      this._render();
+      return;
+    }
+    const id = event.target.id;
+    if (id === "start-btn") this._startSurvey(this._selectedAreaId);
+    else if (id === "stop-btn") this._stopSurvey();
+    else if (id === "sim-toggle") this._toggleSimulation();
+    else if (id === "sim-generate") this._generateSim();
   }
 
   set hass(hass) {
@@ -73,7 +102,23 @@ class RoomprintPanel extends HTMLElement {
       this._loaded = true;
       this._load();
     }
-    this._render();
+    // Home Assistant calls this on every state change, and the panel
+    // used to rebuild its whole DOM on each one. While simulating the
+    // room sensor updates every second, so the panel rebuilt every
+    // second — and a rebuild landing mid-tap destroys the button under
+    // the finger. Re-render only when the room itself changed; the live
+    // bars update through the roomprint_live event instead.
+    const roomState =
+      hass && hass.states
+        ? (hass.states.find((s) => s.entity_id === "sensor.roomprint_room") || {})
+            .state
+        : undefined;
+    if (roomState !== this._lastRoomState && !this._dragging) {
+      this._lastRoomState = roomState;
+      this._render();
+    } else if (roomState !== this._lastRoomState) {
+      this._lastRoomState = roomState;
+    }
   }
 
   disconnectedCallback() {
@@ -287,7 +332,9 @@ class RoomprintPanel extends HTMLElement {
       });
       if (result.readings) this._liveReadings = result.readings;
       if (result.room) this._liveRoom = result.room;
-      if (!this._dragging) this._render();
+      // The roomprint_live event already re-renders the Simulate tab;
+      // never rebuild the DOM from here while on another tab.
+      if (!this._dragging && this._tab === "simulate") this._render();
     } catch (err) {
       /* keep the last known state; the next drag retries */
     }
@@ -539,37 +586,12 @@ class RoomprintPanel extends HTMLElement {
   }
 
   _attachHandlers() {
+    // Clicks are handled by the delegated listener on the shadow root
+    // (see the constructor) — they survive the panel's innerHTML
+    // rebuilds. Only the map's pointer handlers need the live SVG
+    // element, so only those are attached here per render.
     const root = this.shadowRoot;
     if (!root) return;
-    root.querySelectorAll(".tab").forEach((el) => {
-      el.addEventListener("click", () => {
-        this._tab = el.getAttribute("data-tab");
-        this._syncSimPolling();
-        this._render();
-      });
-    });
-    root.querySelectorAll(".room").forEach((el) => {
-      el.addEventListener("click", () => {
-        this._selectedAreaId = el.getAttribute("data-area");
-        this._render();
-      });
-    });
-    const startBtn = root.querySelector("#start-btn");
-    if (startBtn) {
-      startBtn.addEventListener("click", () => this._startSurvey(this._selectedAreaId));
-    }
-    const stopBtn = root.querySelector("#stop-btn");
-    if (stopBtn) {
-      stopBtn.addEventListener("click", () => this._stopSurvey());
-    }
-    const toggleBtn = root.querySelector("#sim-toggle");
-    if (toggleBtn) {
-      toggleBtn.addEventListener("click", () => this._toggleSimulation());
-    }
-    const genBtn = root.querySelector("#sim-generate");
-    if (genBtn) {
-      genBtn.addEventListener("click", () => this._generateSim());
-    }
     const svg = root.querySelector("#sim-map");
     const dot = root.querySelector("#phone-dot");
     if (svg && dot) {
