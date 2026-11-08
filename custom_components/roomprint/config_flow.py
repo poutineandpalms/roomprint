@@ -1,0 +1,50 @@
+"""Config flow for Roomprint — one tracked Bluetooth device, single instance."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import voluptuous as vol
+from homeassistant.config_entries import ConfigFlow
+from homeassistant.const import CONF_ADDRESS
+
+from .const import DOMAIN
+
+_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def _normalize_address(address: str) -> str | None:
+    """Validate and normalize a colon-separated MAC (case-insensitive)."""
+    address = address.strip()
+    if not _MAC_RE.match(address):
+        return None
+    return address.upper()
+
+
+class RoomprintConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle the Roomprint config flow."""
+
+    VERSION = 1
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
+        """Single step: ask for the tracked device's Bluetooth address."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            address = _normalize_address(user_input.get(CONF_ADDRESS, ""))
+            if address is None:
+                errors[CONF_ADDRESS] = "invalid_address"
+            else:
+                await self.async_set_unique_id(DOMAIN)
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title="Roomprint",
+                    data={CONF_ADDRESS: address},
+                )
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({vol.Required(CONF_ADDRESS): str}),
+            errors=errors,
+        )
