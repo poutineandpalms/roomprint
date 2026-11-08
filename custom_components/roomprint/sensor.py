@@ -14,13 +14,12 @@ from typing import Any
 from homeassistant.components import bluetooth
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, EVENT_LIVE, EVENT_ROOM_CHANGED, LIVE_EVENT_MIN_INTERVAL
-from .util import RSSI_UNKNOWN, scanner_key
+from .util import RSSI_UNKNOWN, resolved_address, scanner_key
 
 # A scanner not heard from within this long drops out of the live vector,
 # so a stale strong reading cannot pin the room after you walk away.
@@ -45,7 +44,12 @@ class RoomprintRoomSensor(SensorEntity):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self._entry = entry
-        self._address = entry.data[CONF_ADDRESS]
+        # Options (Configure) can change the address after setup.
+        self._address = resolved_address(entry)
+        # Unique id is the config entry id — stable across address
+        # changes, so the entity survives a re-address. Never key it on
+        # the address itself.
+        self._attr_unique_id = f"{entry.entry_id}-room"
         self._attr_native_value = "unknown"
         self._attr_extra_state_attributes: dict[str, Any] = {
             "confidence": None,
@@ -93,6 +97,8 @@ class RoomprintRoomSensor(SensorEntity):
             return None
         result = matcher.evaluate(live, now)
         room_id = result["room"]
+        # The device tracker reads the current room from here.
+        runtime["current_room"] = room_id
         if room_id is not None and room_id != self._last_room_id:
             self.hass.bus.async_fire(
                 EVENT_ROOM_CHANGED,
@@ -100,6 +106,8 @@ class RoomprintRoomSensor(SensorEntity):
                     "from_room": self._last_room_id,
                     "to_room": room_id,
                     "confidence": result["confidence"],
+                    "device": self._address,
+                    "entity_id": self.entity_id,
                 },
             )
             self._last_room_id = room_id
@@ -114,6 +122,8 @@ class RoomprintRoomSensor(SensorEntity):
                     },
                     "room": room_id,
                     "confidence": result["confidence"],
+                    "device": self._address,
+                    "entity_id": self.entity_id,
                 },
             )
         return result
@@ -132,6 +142,10 @@ class RoomprintRoomSensor(SensorEntity):
         if runtime.get("simulation"):
             return  # never mix real advertisements with a simulation
         now = time.time()
+        # Real advertisements only — the simulator path (apply_live)
+        # never touches last_seen, so the tracker can't be kept home
+        # by fake readings.
+        runtime["last_seen"] = now
         self._latest[scanner_key(self.hass, service_info.source)] = (rssi, now)
         live = {
             key: rssi_value

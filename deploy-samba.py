@@ -39,6 +39,7 @@ FILES = [
     "__init__.py",
     "config_flow.py",
     "const.py",
+    "device_tracker.py",
     "manifest.json",
     "matcher.py",
     "sensor.py",

@@ -6,8 +6,9 @@ import re
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow
+from homeassistant.config_entries import ConfigFlow, OptionsFlow
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.core import callback
 
 from .const import DOMAIN
 
@@ -26,6 +27,14 @@ class RoomprintConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle the Roomprint config flow."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: Any,
+    ) -> OptionsFlow:
+        """Return the options flow (Configure in the UI)."""
+        return RoomprintOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -46,5 +55,41 @@ class RoomprintConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({vol.Required(CONF_ADDRESS): str}),
+            errors=errors,
+        )
+
+
+class RoomprintOptionsFlow(OptionsFlow):
+    """Change the tracked device's Bluetooth address after setup.
+
+    Reached from Settings → Devices & services → Roomprint → Configure.
+    Same validation and uppercasing as the setup flow. Saving reloads
+    the entry, so the sensor unsubscribes from the old address and
+    subscribes to the new one.
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> Any:
+        """Single step: the Bluetooth address, pre-filled with the current one."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            address = _normalize_address(user_input.get(CONF_ADDRESS, ""))
+            if address is None:
+                errors[CONF_ADDRESS] = "invalid_address"
+            else:
+                return self.async_create_entry(
+                    title="",
+                    data={CONF_ADDRESS: address},
+                )
+        current = (
+            self.config_entry.options.get(CONF_ADDRESS)
+            or self.config_entry.data[CONF_ADDRESS]
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_ADDRESS, default=current): str}
+            ),
             errors=errors,
         )

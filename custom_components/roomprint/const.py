@@ -6,7 +6,7 @@ DOMAIN = "roomprint"
 STORAGE_KEY = "roomprint"
 STORAGE_VERSION = 1
 
-PLATFORMS: list[str] = ["sensor"]
+PLATFORMS: list[str] = ["sensor", "device_tracker"]
 
 # Event fired on the bus (throttled) so the survey panel can show live bars.
 EVENT_LIVE = "roomprint_live"

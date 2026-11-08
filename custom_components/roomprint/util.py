@@ -2,11 +2,26 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 # RSSI sentinel for "unknown" (used by the Bluetooth stack).
 RSSI_UNKNOWN = -127
+
+
+def resolved_address(entry: ConfigEntry) -> str:
+    """The tracked Bluetooth address for an entry.
+
+    The options flow (Configure) can change the address after setup, so
+    the option wins; entries created before options existed only have
+    the setup data. One definition, used by setup, sensor, and tracker.
+    """
+    options: dict[str, Any] = entry.options or {}
+    return options.get(CONF_ADDRESS) or entry.data[CONF_ADDRESS]
 
 
 def scanner_key(hass: HomeAssistant, source: str) -> str:

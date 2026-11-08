@@ -47,8 +47,25 @@ for now.
    → Roomprint) and enter the Bluetooth address of the device to track
    (your phone). If your phone's address rotates, add it to the Private
    BLE Device integration first so Home Assistant resolves it to one
-   stable address — Roomprint tracks that address.
+   stable address — Roomprint tracks that address. To change the address
+   later, use Settings → Devices & services → Roomprint → Configure
+   (the entry reloads and the sensor subscribes to the new address).
 3. Open **Room Survey** in the sidebar and survey each room, doors open.
+
+## Multiple people
+
+One config entry tracks one phone, so a household adds one entry per
+person. Each entry gets its own room sensor (`sensor.roomprint_room`,
+with more entries the names gain suffixes) and its own
+`roomprint_room_changed` event carrying that device's address.
+
+Each entry also creates a `device_tracker.roomprint_tracker` entity:
+its state is `home` while the phone is heard, `not_home` once it goes
+quiet for 3 minutes, and `unknown` before it is ever seen. The room is
+an `area` attribute on the tracker, not its state. Link the tracker to
+a person in Settings → People and that person's state follows it
+natively (home / not_home) — the room itself stays on the room sensor,
+which is where room automations should trigger.
 
 ## Simulator
 
@@ -95,8 +112,11 @@ bug in Roomprint, not a requirement.
 - `manifest.json` — integration metadata (`requirements: []`,
   `iot_class: calculated`, config flow).
 - `__init__.py` — setup, storage, sidebar panel registration.
-- `config_flow.py` — one step: the tracked device's Bluetooth address.
+- `config_flow.py` — setup: the tracked device's Bluetooth address.
+  Options flow (Configure): change the address after setup.
 - `sensor.py` — the room sensor, fed by the Bluetooth advertisement stream.
+- `device_tracker.py` — home/not_home tracker per device, for the native
+  Person (room as its `area` attribute, never its state).
 - `websocket.py` — the `roomprint/*` API used by the survey panel.
 - `matcher.py` — the pure matcher core (stdlib only, no Home Assistant).
 - `simulate.py` — the dummy-map RSSI model (stdlib only). The panel sends
