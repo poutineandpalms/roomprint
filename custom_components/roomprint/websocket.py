@@ -270,7 +270,7 @@ def websocket_get_fingerprints(
 # ---------------- simulator ----------------
 
 # Area-name keywords, in match order, onto the dummy-map room slugs.
-_SIM_SLUGS = ("living", "kitchen", "master", "guest", "bath")
+_SIM_SLUGS = ("living", "kitchen", "master", "guest", "bath", "entrance")
 
 
 def _slug_for_area(name: str) -> str | None:

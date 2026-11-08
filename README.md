@@ -55,7 +55,7 @@ for now.
 No hardware yet? The **Simulate** tab in the panel (next to Survey)
 validates the whole flow with dummy data. It maps your Home Assistant
 areas onto a dummy floor plan by name (living, kitchen, master, guest,
-bath), builds dummy fingerprints from a path-loss model, and lets you
+bath, entrance), builds dummy fingerprints from a path-loss model, and lets you
 drag a phone dot around an SVG map. The fake RSSI runs through the real
 matcher and the real room sensor, so you can watch `sensor.roomprint_room`
 change and room-change events fire as you drag across a boundary.

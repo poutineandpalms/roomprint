@@ -40,6 +40,8 @@ DEFAULT_MAP: dict[str, dict] = {
     "master":  {"x": 7.6, "y": 1.4, "radius": 1.7},
     "guest":   {"x": 2.6, "y": 1.3, "radius": 1.6},
     "bath":    {"x": 5.2, "y": 1.2, "radius": 1.0},
+    # Small corridor at the bottom edge, off the living room.
+    "entrance": {"x": 5.0, "y": 5.2, "radius": 0.9},
 }
 
 
